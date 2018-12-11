@@ -2,16 +2,15 @@ package com.example.demo;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.aop.interceptor.AsyncUncaughtExceptionHandler;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.context.ApplicationEvent;
-import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.context.ApplicationEventPublisherAware;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.event.EventListener;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.AsyncConfigurer;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.stereotype.Component;
@@ -23,7 +22,7 @@ import org.springframework.transaction.interceptor.TransactionAspectSupport;
 @SpringBootApplication
 public class DemoApplication implements CommandLineRunner {
 
-    @Autowired StateMachinePublisherService publisherService;
+    @Autowired AsyncService asyncService;
 
     public static void main(String[] args) {
         SpringApplication.run(DemoApplication.class, args);
@@ -31,30 +30,43 @@ public class DemoApplication implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        publisherService.publishEvent("test");
+        asyncService.asyncCall();
     }
 
     @Configuration
     @EnableAsync
     public static class AsyncConfig implements AsyncConfigurer {
-        // the idea is to handle error with this bean -> save error in DB
-        @Autowired ErrorHandler errorHandler; // fixme: causes transaction not to exist
+        @Lazy // <- this is the missing part
+        @Autowired
+        ErrorHandler errorHandler;
+
+        @Override
+        public AsyncUncaughtExceptionHandler getAsyncUncaughtExceptionHandler() {
+            return (throwable, method, objects) -> errorHandler.writeError(throwable);
+        }
     }
 
     @Service
     public static class ErrorHandler {
+        private static final Logger LOG = LoggerFactory.getLogger(ErrorHandler.class);
+
         @Autowired DbService dbService;
+
+        public void writeError(Throwable throwable) {
+            dbService.writeError(throwable.getMessage());
+            LOG.error("Error handler received error: {}", throwable.getMessage());
+        }
     }
 
     @Component
-    public static class AsyncNotifier {
+    public static class AsyncService {
 
         @Autowired DbService dbService;
 
-        @EventListener(CustomEvent.class)
+        @Async
         public void asyncCall() {
-            // time consuming http call
             dbService.accessDb(); // save result in db
+            throw new RuntimeException("exception thrown");
         }
 
     }
@@ -71,33 +83,13 @@ public class DemoApplication implements CommandLineRunner {
             int updated = jdbcTemplate.update("insert into test_table(test_column) values (10)");
             LOG.info("insert changed: {}", updated);
         }
-    }
 
-    @Component
-    public static class StateMachinePublisherService implements ApplicationEventPublisherAware {
-
-        private ApplicationEventPublisher publisher;
-
-        @Override
-        public void setApplicationEventPublisher(ApplicationEventPublisher applicationEventPublisher) {
-            this.publisher = applicationEventPublisher;
+        @Transactional
+        public void writeError(String message) {
+            TransactionAspectSupport.currentTransactionStatus(); // is there a transaction ??
+            int updated = jdbcTemplate.update("insert into test_table(test_column) values (?)", message);
+            LOG.info("error changed: {}", updated);
         }
-
-        public void publishEvent(Object data) {
-            publisher.publishEvent(new CustomEvent(this, data));
-        }
-
-    }
-
-    public static class CustomEvent extends ApplicationEvent {
-
-        public Object data;
-
-        public CustomEvent(Object source, Object data) {
-            super(source);
-            this.data = data;
-        }
-
     }
 
 }
